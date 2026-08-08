@@ -533,26 +533,102 @@
 
     <div id="notification" class="notification"></div>
 
+
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/11.10.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.10.0/firebase-database-compat.js"></script>
+
     <script>
-        // Initialize storage and data
-        let students = JSON.parse(localStorage.getItem('students')) || {};
-        let admins = JSON.parse(localStorage.getItem('admins')) || {};
-        let books = JSON.parse(localStorage.getItem('books')) || {};
-        let issuedBooks = JSON.parse(localStorage.getItem('issuedBooks')) || {};
+        const firebaseConfig = {
+            apiKey: "AIzaSyBPBx56VzYvm13QhzaynvAC8ciMp0T1cEU",
+            authDomain: "library-app-13a9f.firebaseapp.com",
+            databaseURL: "https://library-app-13a9f-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "library-app-13a9f",
+            storageBucket: "library-app-13a9f.firebasestorage.app",
+            messagingSenderId: "719063805200",
+            appId: "1:719063805200:web:8009c5dc2ab9ebfa2fc995",
+            measurementId: "G-SDR4Z3ZQ6Y"
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+    </script>
+
+    <script>
+        // ============================================================
+        // CURIOSITY CORNER - FIREBASE REALTIME DATABASE VERSION
+        // ============================================================
+
+        let students = {};
+        let admins = {};
+        let books = {};
+        let issuedBooks = {};
         let currentUser = localStorage.getItem('currentUser') || null;
         let currentUserType = localStorage.getItem('currentUserType') || null;
         let currentStudentId = null;
-
-        // for two-step return confirmation
         let pendingReturnKey = null;
+        let firebaseReady = false;
 
-        // Initialize app
-        document.addEventListener('DOMContentLoaded', function() {
-            setTimeout(() => {
+        // ---------------- Firebase helpers ----------------
+        async function loadAllData() {
+            try {
+                const snapshot = await db.ref('/').once('value');
+                const data = snapshot.val() || {};
+
+                students = data.students || {};
+                admins = data.admins || {};
+                books = data.books || {};
+                issuedBooks = data.issuedBooks || {};
+
+                updateBooksAvailabilityLocal();
+                firebaseReady = true;
+                return true;
+            } catch (error) {
+                console.error(error);
+                showNotification('Could not connect to Firebase. Check your database rules.', 'error');
+                return false;
+            }
+        }
+
+        async function save(path, value) {
+            try {
+                await db.ref(path).set(value);
+                return true;
+            } catch (error) {
+                console.error('Firebase write error:', error);
+                showNotification('Firebase save failed. Check Database Rules.', 'error');
+                return false;
+            }
+        }
+
+        async function saveMultiple(updates) {
+            try {
+                await db.ref('/').update(updates);
+                return true;
+            } catch (error) {
+                console.error('Firebase update error:', error);
+                showNotification('Firebase save failed. Check Database Rules.', 'error');
+                return false;
+            }
+        }
+
+        function updateBooksAvailabilityLocal() {
+            Object.keys(books).forEach(id => {
+                if (books[id].availableCopies == null) {
+                    books[id].availableCopies = books[id].totalCopies || 0;
+                }
+            });
+        }
+
+        // ---------------- App initialization ----------------
+        document.addEventListener('DOMContentLoaded', async function () {
+            setTimeout(async () => {
                 document.getElementById('popup').style.display = 'none';
                 document.getElementById('loginPage').style.display = 'block';
 
-                // Auto login if someone already logged in before
+                const connected = await loadAllData();
+                if (!connected) return;
+
                 if (currentUser && currentUserType === 'student' && students[currentUser]) {
                     currentStudentId = currentUser;
                     showStudentDashboard();
@@ -562,19 +638,40 @@
                 }
             }, 3000);
 
-            updateBooksAvailability();
-
-            // modal buttons
-            document.getElementById('returnModalOk').addEventListener('click', function() {
+            document.getElementById('returnModalOk').addEventListener('click', async function () {
                 document.getElementById('returnModal').style.display = 'none';
+
+                if (!pendingReturnKey) return;
+
+                const key = pendingReturnKey;
+                const ib = issuedBooks[key];
+
+                if (ib && books[ib.bookId]) {
+                    books[ib.bookId].availableCopies += 1;
+
+                    const updates = {};
+                    updates['books/' + ib.bookId + '/availableCopies'] = books[ib.bookId].availableCopies;
+                    updates['issuedBooks/' + key] = null;
+
+                    const ok = await saveMultiple(updates);
+                    if (ok) {
+                        delete issuedBooks[key];
+                        pendingReturnKey = null;
+                        loadIssuedBooks();
+                        loadStudentBooks();
+                        loadStudentActivity();
+                        showNotification('Book returned successfully', 'success');
+                    }
+                }
             });
-            document.getElementById('returnModalCancel').addEventListener('click', function() {
+
+            document.getElementById('returnModalCancel').addEventListener('click', function () {
                 document.getElementById('returnModal').style.display = 'none';
                 pendingReturnKey = null;
             });
         });
 
-        // Notification
+        // ---------------- Notification ----------------
         function showNotification(message, type) {
             const notif = document.getElementById('notification');
             notif.textContent = message;
@@ -584,7 +681,7 @@
             }, 3000);
         }
 
-        // Validation functions
+        // ---------------- Validation ----------------
         function validateStudentName(name) {
             if (!name.trim()) return false;
             return !/ {2,}/.test(name);
@@ -603,15 +700,15 @@
         }
 
         function validateYear(year) {
-            return ['1','2','3','4'].includes(year);
+            return ['1', '2', '3', '4'].includes(year);
         }
 
         function validatePassword(pass) {
             return pass.length >= 6;
         }
 
-        // Student Authentication
-        function studentLogin() {
+        // ---------------- Student Authentication ----------------
+        async function studentLogin() {
             const id = document.getElementById('studentId').value.trim().toUpperCase();
             const pass = document.getElementById('studentPass').value;
 
@@ -626,15 +723,19 @@
             }
 
             currentStudentId = id;
+            currentUser = id;
+            currentUserType = 'student';
+
             localStorage.setItem('currentUser', id);
             localStorage.setItem('currentUserType', 'student');
+
             showStudentDashboard();
             clearStudentLogin();
             showNotification('Login successful!', 'success');
         }
 
-        function studentRegister() {
-            const name = document.getElementById('sName').value;
+        async function studentRegister() {
+            const name = document.getElementById('sName').value.trim();
             const id = document.getElementById('sId').value.toUpperCase().trim();
             const mobile = document.getElementById('sMobile').value.trim();
             const branch = document.getElementById('sBranch').value.trim();
@@ -681,15 +782,24 @@
                 return;
             }
 
-            students[id] = { name, mobile, branch, year, password: pass };
-            localStorage.setItem('students', JSON.stringify(students));
-            showNotification('Registration successful! Please login.', 'success');
-            showStudentLogin();
-            clearStudentRegister();
+            const student = {
+                name,
+                mobile,
+                branch,
+                year,
+                password: pass
+            };
+
+            if (await save('students/' + id, student)) {
+                students[id] = student;
+                showNotification('Registration successful! Please login.', 'success');
+                showStudentLogin();
+                clearStudentRegister();
+            }
         }
 
-        // Admin Authentication
-        function adminLogin() {
+        // ---------------- Admin Authentication ----------------
+        async function adminLogin() {
             const user = document.getElementById('adminUser').value.trim();
             const pass = document.getElementById('adminPass').value;
             const date = document.getElementById('adminDate').value;
@@ -704,21 +814,30 @@
                 return;
             }
 
+            currentUser = user;
+            currentUserType = 'admin';
+
             localStorage.setItem('currentUser', user);
             localStorage.setItem('currentUserType', 'admin');
+
             document.getElementById('currentAdmin').textContent = user;
             showAdminDashboard();
             clearAdminLogin();
             showNotification('Admin login successful!', 'success');
         }
 
-        function adminRegister() {
+        async function adminRegister() {
             const user = document.getElementById('aUser').value.trim();
             const pass = document.getElementById('aPass').value;
             const libCode = document.getElementById('libCode').value.trim();
 
             if (!user || !pass || !libCode) {
                 showNotification('Please fill all fields', 'error');
+                return;
+            }
+
+            if (!validatePassword(pass)) {
+                showNotification('Password: minimum 6 characters', 'error');
                 return;
             }
 
@@ -732,14 +851,20 @@
                 return;
             }
 
-            admins[user] = { password: pass, libCode };
-            localStorage.setItem('admins', JSON.stringify(admins));
-            showNotification('Admin registered successfully!', 'success');
-            showAdminLogin();
-            clearAdminRegister();
+            const admin = {
+                password: pass,
+                libCode
+            };
+
+            if (await save('admins/' + user, admin)) {
+                admins[user] = admin;
+                showNotification('Admin registered successfully!', 'success');
+                showAdminLogin();
+                clearAdminRegister();
+            }
         }
 
-        // UI Functions
+        // ---------------- UI functions ----------------
         function showStudentRegister() {
             document.getElementById('studentLogin').style.display = 'none';
             document.getElementById('studentRegister').style.display = 'block';
@@ -761,7 +886,10 @@
         }
 
         function showStudentDashboard() {
+            if (!students[currentStudentId]) return;
+
             document.getElementById('loginPage').style.display = 'none';
+            document.getElementById('adminDash').style.display = 'none';
             document.getElementById('studentDash').style.display = 'block';
             document.getElementById('studentRules').style.display = 'block';
             document.getElementById('studentMainDash').style.display = 'none';
@@ -777,6 +905,7 @@
 
         function showAdminDashboard() {
             document.getElementById('loginPage').style.display = 'none';
+            document.getElementById('studentDash').style.display = 'none';
             document.getElementById('adminDash').style.display = 'block';
             showAdminSection('searchBooks');
         }
@@ -856,7 +985,7 @@
             }
         }
 
-        // Clear forms
+        // ---------------- Clear forms ----------------
         function clearStudentLogin() {
             document.getElementById('studentId').value = '';
             document.getElementById('studentPass').value = '';
@@ -886,16 +1015,18 @@
         function logout() {
             localStorage.removeItem('currentUser');
             localStorage.removeItem('currentUserType');
+
             currentUser = null;
             currentUserType = null;
             currentStudentId = null;
+
             document.getElementById('adminDash').style.display = 'none';
             document.getElementById('studentDash').style.display = 'none';
             document.getElementById('loginPage').style.display = 'block';
         }
 
-        // Books handling
-        function addBook() {
+        // ---------------- Books ----------------
+        async function addBook() {
             const name = document.getElementById('bookName').value.trim();
             const id = document.getElementById('bookId').value.trim().toUpperCase();
             const author = document.getElementById('bookAuthor').value.trim();
@@ -911,33 +1042,31 @@
                 return;
             }
 
-            books[id] = {
+            const book = {
                 name,
                 author,
                 totalCopies: copies,
                 availableCopies: copies
             };
 
-            localStorage.setItem('books', JSON.stringify(books));
-            updateBooksAvailability();
-            showNotification('Book added successfully', 'success');
-            document.getElementById('bookName').value = '';
-            document.getElementById('bookId').value = '';
-            document.getElementById('bookAuthor').value = '';
-            document.getElementById('bookCopies').value = '';
-        }
+            if (await save('books/' + id, book)) {
+                books[id] = book;
+                showNotification('Book added successfully', 'success');
 
-        function updateBooksAvailability() {
-            Object.keys(books).forEach(id => {
-                if (books[id].availableCopies == null) {
-                    books[id].availableCopies = books[id].totalCopies || 0;
-                }
-            });
-            localStorage.setItem('books', JSON.stringify(books));
+                document.getElementById('bookName').value = '';
+                document.getElementById('bookId').value = '';
+                document.getElementById('bookAuthor').value = '';
+                document.getElementById('bookCopies').value = '';
+
+                loadAdminBooks();
+                loadStudentBooks();
+            }
         }
 
         function loadAdminBooks() {
             const tableDiv = document.getElementById('adminBooksTable');
+            if (!tableDiv) return;
+
             let html = `
                 <table>
                     <thead>
@@ -952,6 +1081,7 @@
                     </thead>
                     <tbody>
             `;
+
             Object.keys(books).forEach(id => {
                 const b = books[id];
                 html += `
@@ -968,6 +1098,7 @@
                     </tr>
                 `;
             });
+
             html += `</tbody></table>`;
             tableDiv.innerHTML = html;
         }
@@ -975,6 +1106,7 @@
         function filterAdminBooks() {
             const query = document.getElementById('adminBookSearch').value.toLowerCase();
             const rows = document.querySelectorAll('#adminBooksTable tbody tr');
+
             rows.forEach(row => {
                 const cells = row.getElementsByTagName('td');
                 const text = (cells[0].innerText + ' ' + cells[1].innerText + ' ' + cells[2].innerText).toLowerCase();
@@ -982,43 +1114,70 @@
             });
         }
 
-        function editBook(id) {
+        async function editBook(id) {
             const b = books[id];
+            if (!b) return;
+
             const newName = prompt('Enter new book name:', b.name);
             if (newName === null) return;
+
             const newAuthor = prompt('Enter new author:', b.author);
             if (newAuthor === null) return;
+
             const newTotal = prompt('Enter total copies:', b.totalCopies);
             if (newTotal === null) return;
+
             const totalNum = parseInt(newTotal, 10);
+
             if (!newName.trim() || !newAuthor.trim() || isNaN(totalNum) || totalNum <= 0) {
                 showNotification('Invalid book details', 'error');
                 return;
             }
-            const diff = totalNum - b.totalCopies;
-            b.name = newName.trim();
-            b.author = newAuthor.trim();
-            b.totalCopies = totalNum;
-            b.availableCopies = Math.max(0, b.availableCopies + diff);
-            books[id] = b;
-            localStorage.setItem('books', JSON.stringify(books));
-            loadAdminBooks();
-            loadStudentBooks();
-            showNotification('Book updated', 'success');
+
+            const borrowedCopies = b.totalCopies - b.availableCopies;
+
+            if (totalNum < borrowedCopies) {
+                showNotification('Total copies cannot be less than currently issued copies', 'error');
+                return;
+            }
+
+            const updatedBook = {
+                name: newName.trim(),
+                author: newAuthor.trim(),
+                totalCopies: totalNum,
+                availableCopies: totalNum - borrowedCopies
+            };
+
+            if (await save('books/' + id, updatedBook)) {
+                books[id] = updatedBook;
+                loadAdminBooks();
+                loadStudentBooks();
+                showNotification('Book updated', 'success');
+            }
         }
 
-        function deleteBook(id) {
+        async function deleteBook(id) {
             if (!confirm('Delete this book?')) return;
-            delete books[id];
-            localStorage.setItem('books', JSON.stringify(books));
-            loadAdminBooks();
-            loadStudentBooks();
-            showNotification('Book deleted', 'success');
+
+            const relatedIssue = Object.values(issuedBooks).some(item => item.bookId === id);
+            if (relatedIssue) {
+                showNotification('Cannot delete a book that is currently issued', 'error');
+                return;
+            }
+
+            if (await save('books/' + id, null)) {
+                delete books[id];
+                loadAdminBooks();
+                loadStudentBooks();
+                showNotification('Book deleted', 'success');
+            }
         }
 
-        // Student books view
+        // ---------------- Student books ----------------
         function loadStudentBooks() {
             const tableDiv = document.getElementById('studentBooksTable');
+            if (!tableDiv) return;
+
             let html = `
                 <table>
                     <thead>
@@ -1031,6 +1190,7 @@
                     </thead>
                     <tbody>
             `;
+
             Object.keys(books).forEach(id => {
                 const b = books[id];
                 html += `
@@ -1042,6 +1202,7 @@
                     </tr>
                 `;
             });
+
             html += `</tbody></table>`;
             tableDiv.innerHTML = html;
         }
@@ -1049,6 +1210,7 @@
         function filterStudentBooks() {
             const query = document.getElementById('studentBookSearch').value.toLowerCase();
             const rows = document.querySelectorAll('#studentBooksTable tbody tr');
+
             rows.forEach(row => {
                 const cells = row.getElementsByTagName('td');
                 const text = (cells[0].innerText + ' ' + cells[1].innerText + ' ' + cells[2].innerText).toLowerCase();
@@ -1056,9 +1218,11 @@
             });
         }
 
-        // Student details in admin
+        // ---------------- Student details ----------------
         function loadAdminStudents() {
             const div = document.getElementById('adminStudentsTable');
+            if (!div) return;
+
             let html = `
                 <table>
                     <thead>
@@ -1073,6 +1237,7 @@
                     </thead>
                     <tbody>
             `;
+
             Object.keys(students).forEach(id => {
                 const s = students[id];
                 html += `
@@ -1088,6 +1253,7 @@
                     </tr>
                 `;
             });
+
             html += `</tbody></table>`;
             div.innerHTML = html;
         }
@@ -1095,21 +1261,34 @@
         function filterAdminStudents() {
             const query = document.getElementById('adminStudentSearch').value.toLowerCase();
             const rows = document.querySelectorAll('#adminStudentsTable tbody tr');
+
             rows.forEach(row => {
                 const cells = row.getElementsByTagName('td');
-                const text = (cells[0].innerText + ' ' + cells[1].innerText + ' ' + cells[2].innerText + ' ' + cells[3].innerText + ' ' + cells[4].innerText).toLowerCase();
+                const text = (
+                    cells[0].innerText + ' ' +
+                    cells[1].innerText + ' ' +
+                    cells[2].innerText + ' ' +
+                    cells[3].innerText + ' ' +
+                    cells[4].innerText
+                ).toLowerCase();
+
                 row.style.display = text.includes(query) ? '' : 'none';
             });
         }
 
-        function editStudent(id) {
+        async function editStudent(id) {
             const s = students[id];
+            if (!s) return;
+
             const newName = prompt('Enter new name:', s.name);
             if (newName === null) return;
+
             const newMobile = prompt('Enter new mobile:', s.mobile);
             if (newMobile === null) return;
+
             const newBranch = prompt('Enter new branch:', s.branch);
             if (newBranch === null) return;
+
             const newYear = prompt('Enter new year (1-4):', s.year);
             if (newYear === null) return;
 
@@ -1117,42 +1296,55 @@
                 showNotification('Invalid name (no continuous spaces)', 'error');
                 return;
             }
+
             if (!validatePhone(newMobile)) {
                 showNotification('Invalid mobile', 'error');
                 return;
             }
+
             if (!validateBranch(newBranch.trim())) {
                 showNotification('Invalid branch', 'error');
                 return;
             }
+
             if (!validateYear(newYear.trim())) {
                 showNotification('Invalid year', 'error');
                 return;
             }
 
-            s.name = newName;
-            s.mobile = newMobile;
-            s.branch = newBranch.trim();
-            s.year = newYear.trim();
+            const updatedStudent = {
+                ...s,
+                name: newName.trim(),
+                mobile: newMobile.trim(),
+                branch: newBranch.trim(),
+                year: newYear.trim()
+            };
 
-            students[id] = s;
-            localStorage.setItem('students', JSON.stringify(students));
-            loadAdminStudents();
-            showNotification('Student updated', 'success');
+            if (await save('students/' + id, updatedStudent)) {
+                students[id] = updatedStudent;
+
+                if (currentStudentId === id) {
+                    document.getElementById('currentStudent').textContent = updatedStudent.name;
+                }
+
+                loadAdminStudents();
+                showNotification('Student updated', 'success');
+            }
         }
 
-        // Date difference in days
+        // ---------------- Issue / Return ----------------
         function daysBetween(dateString1, dateString2) {
             const d1 = new Date(dateString1);
             const d2 = new Date(dateString2);
             const msPerDay = 1000 * 60 * 60 * 24;
+
             const utc1 = Date.UTC(d1.getFullYear(), d1.getMonth(), d1.getDate());
             const utc2 = Date.UTC(d2.getFullYear(), d2.getMonth(), d2.getDate());
+
             return Math.floor((utc2 - utc1) / msPerDay);
         }
 
-        // Issue books (only for registered students)
-        function issueBook() {
+        async function issueBook() {
             const sid = document.getElementById('issueStudentId').value.trim().toUpperCase();
             const bid = document.getElementById('issueBookId').value.trim().toUpperCase();
             const issueDate = document.getElementById('issueDate').value;
@@ -1178,37 +1370,49 @@
             }
 
             const key = sid + '_' + bid;
+
             if (issuedBooks[key]) {
                 showNotification('Book already issued to this student', 'error');
                 return;
             }
 
-            issuedBooks[key] = {
+            const issueRecord = {
                 studentId: sid,
                 bookId: bid,
                 issueDate: issueDate
             };
 
-            books[bid].availableCopies -= 1;
-            localStorage.setItem('books', JSON.stringify(books));
-            localStorage.setItem('issuedBooks', JSON.stringify(issuedBooks));
+            const newAvailable = books[bid].availableCopies - 1;
 
-            loadIssuedBooks();
-            loadStudentActivity();
-            loadStudentBooks();
-            showNotification('Book issued successfully', 'success');
+            const updates = {};
+            updates['issuedBooks/' + key] = issueRecord;
+            updates['books/' + bid + '/availableCopies'] = newAvailable;
+
+            if (await saveMultiple(updates)) {
+                issuedBooks[key] = issueRecord;
+                books[bid].availableCopies = newAvailable;
+
+                loadIssuedBooks();
+                loadStudentActivity();
+                loadStudentBooks();
+
+                showNotification('Book issued successfully', 'success');
+            }
         }
 
         function calculateFine(issueDate) {
             const today = new Date();
             const todayStr = today.toISOString().split('T')[0];
             const diffDays = daysBetween(issueDate, todayStr);
+
             if (diffDays <= 10) return 0;
             return (diffDays - 10) * 10;
         }
 
         function loadIssuedBooks() {
             const div = document.getElementById('issuedBooksTable');
+            if (!div) return;
+
             let html = `
                 <table>
                     <thead>
@@ -1222,9 +1426,11 @@
                     </thead>
                     <tbody>
             `;
+
             Object.keys(issuedBooks).forEach(k => {
                 const ib = issuedBooks[k];
                 const fine = calculateFine(ib.issueDate);
+
                 html += `
                     <tr data-key="${k}">
                         <td>${ib.studentId}</td>
@@ -1237,40 +1443,25 @@
                     </tr>
                 `;
             });
+
             html += `</tbody></table>`;
             div.innerHTML = html;
         }
 
         function handleReturn(key) {
-            if (pendingReturnKey === null) {
-                pendingReturnKey = key;
-                document.getElementById('returnModal').style.display = 'flex';
-            } else if (pendingReturnKey === key) {
-                const ib = issuedBooks[key];
-                if (ib && books[ib.bookId]) {
-                    books[ib.bookId].availableCopies += 1;
-                    localStorage.setItem('books', JSON.stringify(books));
-                }
+            if (!issuedBooks[key]) return;
 
-                delete issuedBooks[key];
-                localStorage.setItem('issuedBooks', JSON.stringify(issuedBooks));
-
-                pendingReturnKey = null;
-                loadIssuedBooks();
-                loadStudentBooks();
-                loadStudentActivity();
-                showNotification('Book returned successfully', 'success');
-            } else {
-                // If admin clicks another row after first warning, reset and show warning for new row
-                pendingReturnKey = key;
-                document.getElementById('returnModal').style.display = 'flex';
-            }
+            pendingReturnKey = key;
+            document.getElementById('returnModal').style.display = 'flex';
         }
 
-        // Student Activity
+        // ---------------- Student activity ----------------
         function loadStudentActivity() {
             if (!currentStudentId) return;
+
             const div = document.getElementById('studentActivityTable');
+            if (!div) return;
+
             let html = `
                 <table>
                     <thead>
@@ -1282,10 +1473,13 @@
                     </thead>
                     <tbody>
             `;
+
             Object.keys(issuedBooks).forEach(k => {
                 const ib = issuedBooks[k];
+
                 if (ib.studentId === currentStudentId) {
                     const fine = calculateFine(ib.issueDate);
+
                     html += `
                         <tr>
                             <td>${ib.bookId}</td>
@@ -1295,9 +1489,11 @@
                     `;
                 }
             });
+
             html += `</tbody></table>`;
             div.innerHTML = html;
         }
     </script>
+
 </body>
 </html>
